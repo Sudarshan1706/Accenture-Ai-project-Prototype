@@ -11,51 +11,44 @@ const modifiedPage = fs.readFileSync('current_page.dc.html', 'utf-8');
 templateData.pages['Defect Intelligence Platform.dc'] = modifiedPage;
 
 // Stringify and escape </script> so the browser doesn't close the script tag early.
+// Without this, every </script> inside the page HTML (dc-runtime, component, etc.)
+// would be parsed by the browser as closing the outer <script type="__bundler/template">
+// tag, causing the remaining JSON content to be rendered as raw visible text with
+// literal \n\n\n... sequences on screen.
 const newTemplateJson = JSON.stringify(templateData).replace(/<\/script>/g, '<\\/script>');
 
-// Read the base HTML from git — the committed version has inner </script> properly
-// escaped as <\/script>, so the first plain </script> IS the real closing tag.
-// Using the local checkout risks getting a version where git CRLF conversion or a
-// previous botched repack has left unescaped </script> inside the JSON, which causes
-// pack.js to split at the wrong place and append 789KB of leaked content.
-const origHtml = execSync('git show HEAD~1:index.html', { maxBuffer: 10 * 1024 * 1024 }).toString('utf-8');
+// Use the first clean commit as the base — take only the content BEFORE the template
+// open tag (bundler script + manifest + ext_resources), then append the new template
+// and a clean closing. The original files all had unescaped </script> inside the JSON,
+// causing the leaked content problem. We ignore everything from the template open tag
+// onwards in the original.
+const origHtml = execSync('git show 49c74fe:index.html', { maxBuffer: 10 * 1024 * 1024 }).toString('utf-8');
 
 const OPEN_TAG = '<script type="__bundler/template">';
-const CLOSE_TAG = '</script>';
-
 const openIdx = origHtml.indexOf(OPEN_TAG);
-if (openIdx === -1) throw new Error('Could not find __bundler/template open tag');
+if (openIdx === -1) throw new Error('Could not find __bundler/template open tag in base');
 
-// The committed base has <\/script> (with backslash) inside the JSON, so the first
-// plain </script> after the open tag is the actual closing tag of the script block.
-const searchFrom = openIdx + OPEN_TAG.length;
-const closeIdx = origHtml.indexOf(CLOSE_TAG, searchFrom);
-if (closeIdx === -1) throw new Error('Could not find __bundler/template close tag');
-
+// Take everything before the template open (bundler script, manifest, ext_resources)
 const before = origHtml.slice(0, openIdx);
-const after = origHtml.slice(closeIdx + CLOSE_TAG.length);
 
-const newHtml = before + OPEN_TAG + '\n' + newTemplateJson + '\n  ' + CLOSE_TAG + after;
+// Build the new HTML with properly-escaped template content and clean ending
+const newHtml = before
+  + OPEN_TAG + '\n'
+  + newTemplateJson
+  + '\n  </script>\n</body>\n</html>';
 
 fs.writeFileSync('index.html', newHtml, 'utf-8');
 
 // Verify
 const ternaryCount = (newHtml.match(/\{\{[^}]*\?[^}]*:[^}]*\}\}/g) || []).length;
-const withSlash = newHtml.indexOf('<\\/script>');
-const noSlashInTemplate = (() => {
-  const tStart = newHtml.indexOf(OPEN_TAG) + OPEN_TAG.length;
-  const tEnd = newHtml.indexOf(CLOSE_TAG, tStart);
-  return newHtml.slice(tStart, tEnd).indexOf('</script>') > -1;
-})();
+const tStart = newHtml.indexOf(OPEN_TAG) + OPEN_TAG.length;
+const tEnd = newHtml.indexOf('</script>', tStart);
+const insideTemplate = newHtml.slice(tStart, tEnd);
+const hasUnescaped = insideTemplate.includes('</script>');
+const afterTemplate = newHtml.slice(tEnd + 9);
 
 console.log('Repacked index.html, size:', newHtml.length);
 console.log('Remaining ternaries:', ternaryCount);
 console.log('Has s10Display:', newHtml.includes('s10Display'));
-console.log('Has <\\/script> (escaped):', withSlash > -1);
-console.log('Has unescaped </script> inside template:', noSlashInTemplate, '(should be false)');
-console.log('Leaked content after template?', (() => {
-  const tStart = newHtml.indexOf(OPEN_TAG) + OPEN_TAG.length;
-  const tClose = newHtml.indexOf(CLOSE_TAG, tStart);
-  const afterTemplate = newHtml.slice(tClose + CLOSE_TAG.length).trim();
-  return afterTemplate.length > 50 ? afterTemplate.slice(0, 100) + '...' : afterTemplate;
-})());
+console.log('Unescaped </script> inside template:', hasUnescaped, '(must be false)');
+console.log('Content after template close:', JSON.stringify(afterTemplate.slice(0, 100)));
